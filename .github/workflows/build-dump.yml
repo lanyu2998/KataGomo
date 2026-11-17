@@ -27,6 +27,15 @@ jobs:
           & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
           & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
 
+      - name: Install cuDNN
+        shell: pwsh
+        run: |
+          $url = 'https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip'
+          Invoke-WebRequest -Uri $url -OutFile cudnn.zip
+          Expand-Archive -Path cudnn.zip -DestinationPath cudnn
+          $root = Get-ChildItem cudnn -Directory | Select-Object -First 1
+          "CUDNN_ROOT=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Setup MSVC env
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -42,7 +51,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$tc" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-release `
             -DCMAKE_CUDA_ARCHITECTURES=89 `
-            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
+            -DCUDNN_INCLUDE_DIR="$env:CUDNN_ROOT\include" `
+            -DCUDNN_LIBRARY="$env:CUDNN_ROOT\lib\x64\cudnn.lib"
 
       - name: Build
         shell: pwsh
@@ -55,3 +66,4 @@ jobs:
           path: |
             build/katago.exe
             build/*.dll
+            cudnn/*/bin/*.dll
