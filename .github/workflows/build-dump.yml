@@ -15,7 +15,7 @@ jobs:
           ref: Gom2024
 
       - name: Install CUDA toolkit 12.6
-        uses: Jimver/cuda-toolkit@v2
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: '12.6.3'
           method: 'local'
