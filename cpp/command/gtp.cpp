@@ -8,6 +8,7 @@
 #include "../dataio/sgf.h"
 #include "../search/asyncbot.h"
 #include "../search/patternbonustable.h"
+#include "../search/searchnode.h"
 #include "../program/setup.h"
 #include "../program/playutils.h"
 #include "../program/play.h"
@@ -94,6 +95,9 @@ static const vector<string> knownCommands = {
 
   //Stop any ongoing ponder or analyze
   "stop",
+
+  //Dump the search tree's node tables (read-only introspection for deduction collection)
+  "kata-dump-subtree",
 };
 
 static bool tryParseLoc(const string& s, const Board& b, Loc& loc) {
@@ -109,6 +113,70 @@ static string filterDoubleNewlines(const string& s) {
     filtered += s[i];
   }
   return filtered;
+}
+
+//推演全树导出：只读递归遍历搜索树，逐节点输出其子节点统计表。
+//行格式（路径 = 从根到该节点的 GTP 坐标，"-" 表示根；winrate 为该层行棋方视角 0..100）：
+//  dumpnode <路径> <visits> <B|W>
+//  dumpmove <路径> <move> <visits> <winrate> <prior> <order> <pv> <pvVisits>
+//  dumpend
+static void dumpSubtreeRec(
+  ostream& out,
+  const Search* search,
+  const SearchNode* node,
+  const string& path,
+  int depth,
+  int maxDepth,
+  int64_t minVisits,
+  int maxChildren,
+  int maxPVLen
+) {
+  if(node == NULL)
+    return;
+  const Board& board = search->getRootBoard();
+  Player pla = node->nextPla;
+  out << "dumpnode " << path << " "
+      << node->stats.visits.load(std::memory_order_acquire) << " "
+      << (pla == P_BLACK ? "B" : "W") << "\n";
+  if(depth >= maxDepth)
+    return;
+
+  vector<AnalysisData> buf;
+  bool duplicateForSymmetries = false;
+  search->getAnalysisData(*node, buf, 0, true, maxPVLen, duplicateForSymmetries);
+  if((int)buf.size() > maxChildren)
+    buf.resize(maxChildren);
+
+  for(const AnalysisData& data : buf) {
+    double winrate = 0.5 * (1.0 + data.winLossValue);
+    if(pla == P_BLACK)
+      winrate = 1.0 - winrate;
+    string moveStr = Location::toString(data.move, board);
+    string pvStr;
+    for(size_t i = 0; i<data.pv.size(); i++) {
+      if(i > 0) pvStr += "/";
+      pvStr += Location::toString(data.pv[i], board);
+    }
+    if(pvStr.empty()) pvStr = "-";
+    string pvvStr;
+    for(size_t i = 0; i<data.pvVisits.size(); i++) {
+      if(i > 0) pvvStr += ",";
+      pvvStr += Global::int64ToString(data.pvVisits[i]);
+    }
+    if(pvvStr.empty()) pvvStr = "-";
+    out << "dumpmove " << path << " " << moveStr << " " << data.numVisits << " "
+        << Global::doubleToString(winrate * 100.0) << " "
+        << Global::doubleToString(data.policyPrior * 100.0) << " "
+        << data.order << " " << pvStr << " " << pvvStr << "\n";
+
+    //只递归已展开（有真实访问量）的子节点：0 访问的子节点没有 NN 输出，
+    //再往下 getAnalysisData 会触发 weightSum>0 的断言
+    if(data.node != NULL && data.numVisits > 0 && data.numVisits >= minVisits) {
+      const SearchNode* child = data.node;
+      string childPath = (path == "-" ? moveStr : path + "/" + moveStr);
+      dumpSubtreeRec(out, search, child, childPath, depth+1, maxDepth, minVisits, maxChildren, maxPVLen);
+    }
+  }
 }
 
 static bool timeIsValid(const double& time) {
@@ -1455,6 +1523,30 @@ int MainCmds::gtp(const vector<string>& args) {
         logger.write("Changed rules to " + newRules.toStringMaybeNice());
         if(!logger.isLoggingToStderr())
           cerr << "Changed rules to " + newRules.toStringMaybeNice() << endl;
+      }
+    }
+
+    else if(command == "kata-dump-subtree") {
+      //推演全树导出：kata-dump-subtree [maxDepth=8] [minVisits=1000] [maxPVLen=6]
+      //只读内省：停止搜索后递归遍历搜索树，输出每个已探索节点的子节点统计表
+      bool parsed = true;
+      int maxDepth = 8;
+      int64_t minVisits = 1000;
+      int maxPVLen = 6;
+      if(pieces.size() > 0 && !Global::tryStringToInt(pieces[0],maxDepth)) parsed = false;
+      if(parsed && pieces.size() > 1 && !Global::tryStringToInt64(pieces[1],minVisits)) parsed = false;
+      if(parsed && pieces.size() > 2 && !Global::tryStringToInt(pieces[2],maxPVLen)) parsed = false;
+      if(!parsed || pieces.size() > 3) {
+        responseIsError = true;
+        response = "Usage: kata-dump-subtree [maxDepth] [minVisits] [maxPVLen]";
+      }
+      else {
+        Search* search = engine->bot->getSearchStopAndWait();
+        ostringstream sout;
+        sout << "dumpbegin" << endl;
+        dumpSubtreeRec(sout, search, search->rootNode, "-", 0, maxDepth, minVisits, 30, maxPVLen);
+        sout << "dumpend" << endl;
+        response = filterDoubleNewlines(sout.str());
       }
     }
 
