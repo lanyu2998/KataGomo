@@ -1,0 +1,51 @@
+name: Build KataGomo (CUDA, kata-dump-subtree patch)
+
+# 编译打了 kata-dump-subtree 补丁的 KataGomo（Gom2024 分支基线，KataGo v1.12.4）。
+# CUDA 后端：与 engines/katagomo 里现有的 cudart/cublas DLL（v12）配套，RTX 4090 可直接替换使用。
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-cuda:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: Gom2024
+
+      - name: Install CUDA toolkit 12.6
+        uses: Jimver/cuda-toolkit@v2
+        with:
+          cuda: '12.6.3'
+          method: 'local'
+
+      - name: Install zlib via vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg $env:GITHUB_WORKSPACE\vcpkg
+          & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
+          & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
+
+      - name: Configure (CMake + CUDA backend)
+        shell: pwsh
+        run: |
+          cmake -B build -S cpp `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DUSE_BACKEND=CUDA `
+            -DUSE_TCMALLOC=OFF `
+            -DCMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DCMAKE_CUDA_ARCHITECTURES=89
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --target katago
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: katagomo-dump-win64-cuda
+          path: |
+            build/Release/katago.exe
+            build/Release/*.dll
