@@ -27,26 +27,31 @@ jobs:
           & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
           & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
 
-      - name: Configure (CMake + CUDA backend)
+      - name: Setup MSVC env
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure (CMake Ninja + CUDA backend)
         shell: pwsh
         run: |
           $tc = "${env:GITHUB_WORKSPACE}\vcpkg\scripts\buildsystems\vcpkg.cmake"
           cmake -B build -S cpp `
-            -G "Visual Studio 18 2026" -A x64 `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DUSE_BACKEND=CUDA `
             -DUSE_TCMALLOC=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$tc" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-release `
-            -DCMAKE_CUDA_ARCHITECTURES=89
+            -DCMAKE_CUDA_ARCHITECTURES=89 `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release --target katago
+        run: cmake --build build --target katago
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: katagomo-dump-win64-cuda
           path: |
-            build/Release/katago.exe
-            build/Release/*.dll
+            build/katago.exe
+            build/*.dll
