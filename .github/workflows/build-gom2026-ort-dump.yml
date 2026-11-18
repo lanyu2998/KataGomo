@@ -1,0 +1,87 @@
+name: Build KataGomo Gom2026 ONNX-Runtime (dump patch)
+
+# 与 build-gom2026-cuda-dump.yml 同源（hzyhhzy/KataGomo Gom2026-cuda-optimized-v2 +
+# kata-dump-subtree 补丁），但后端换成 ONNX Runtime CPU：直接加载 .onnx 模型，
+# 用来验证「ONNX 模型 + dump」这条链路（数值与 CUDA/bin.gz 路线互为参照）。
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-ort:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout self (patch files)
+        uses: actions/checkout@v4
+        with:
+          ref: gom2026-cuda-dump
+
+      - name: Checkout upstream Gom2026-cuda-optimized-v2
+        uses: actions/checkout@v4
+        with:
+          repository: hzyhhzy/KataGomo
+          ref: Gom2026-cuda-optimized-v2
+          path: src
+
+      - name: Apply kata-dump-subtree gtp patch
+        shell: pwsh
+        run: |
+          Copy-Item patches/gom2026-gtp-with-dump.cpp src/cpp/command/gtp.cpp -Force
+          $t = Get-Content src/cpp/command/gtp.cpp -Raw
+          Write-Host ("kata-dump-subtree: " + ([regex]::Matches($t, "kata-dump-subtree")).Count)
+          Write-Host ("dumpSubtreeRec: " + ([regex]::Matches($t, "dumpSubtreeRec")).Count)
+
+      - name: Install ONNX Runtime 1.19.2 (NuGet)
+        shell: pwsh
+        run: |
+          $u = 'https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/1.19.2'
+          Invoke-WebRequest -Uri $u -OutFile ort.nupkg -TimeoutSec 300
+          Expand-Archive -Path ort.nupkg -DestinationPath ort-pkg -Force
+          New-Item -ItemType Directory -Force -Path ort/include, ort/lib | Out-Null
+          Copy-Item ort-pkg/build/native/include/* ort/include -Force
+          Copy-Item ort-pkg/runtimes/win-x64/native/onnxruntime.lib ort/lib -Force
+          Copy-Item ort-pkg/runtimes/win-x64/native/onnxruntime.dll ort/lib -Force
+          Get-ChildItem ort/include | Select-Object -First 5 Name | Format-Table
+          "ORT_ROOT=${env:GITHUB_WORKSPACE}\ort" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install zlib via vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg $env:GITHUB_WORKSPACE\vcpkg
+          & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
+          & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
+
+      - name: Setup MSVC env
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure (CMake Ninja + ONNX Runtime CPU backend)
+        shell: pwsh
+        run: |
+          $tc = "${env:GITHUB_WORKSPACE}\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          cmake -B src/build-ort -S src/cpp `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DUSE_BACKEND=ONNX-CPU `
+            -DUSE_TCMALLOC=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$tc" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DONNXRUNTIME_ROOT="$env:ORT_ROOT"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build src/build-ort --target katago
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item src/build-ort/katago.exe out/katago-ort.exe -Force
+          Copy-Item ort/lib/onnxruntime.dll out/ -Force
+          if (Test-Path src/build-ort/zlib.dll) { Copy-Item src/build-ort/zlib.dll out/ -Force }
+          if (Test-Path src/build-ort/libz.dll) { Copy-Item src/build-ort/libz.dll out/ -Force }
+          Get-ChildItem out | Format-Table Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: katagomo-gom2026-ort-dump
+          path: out/*
