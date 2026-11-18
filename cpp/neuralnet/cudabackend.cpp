@@ -1996,7 +1996,19 @@ struct LoadedModel {
   ModelDesc modelDesc;
 
   LoadedModel(const string& fileName, const string& expectedSha256) {
-    ModelDesc::loadFromFileMaybeGZipped(fileName,modelDesc,expectedSha256);
+    //Support raw ONNX model files the same way the TRT backend does:
+    //parse .onnx into the backend-agnostic ModelDesc, then hand it to CUDA.
+    if(Global::isSuffix(fileName, ".onnx")) {
+      try {
+        ModelDesc::loadFromONNX(fileName, modelDesc);
+      }
+      catch(const StringError& e) {
+        throw StringError("Failed to load ONNX model config: " + fileName + "\n" + e.what());
+      }
+    }
+    else {
+      ModelDesc::loadFromFileMaybeGZipped(fileName,modelDesc,expectedSha256);
+    }
   }
 
   LoadedModel() = delete;
