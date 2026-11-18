@@ -1,0 +1,140 @@
+name: Build KataGomo Gom2026 TensorRT (dump patch)
+
+# 与 build-gom2026-ort-dump.yml 同源（hzyhhzy/KataGomo Gom2026-cuda-optimized-v2 +
+# kata-dump-subtree 补丁），后端用 TensorRT（USE_BACKEND=TENSORRT），直接加载 .onnx。
+# 头文件取 NVIDIA/TensorRT 公开仓库 v10.16；导入库由 release 里的
+# nvinfer_10.dll / nvonnxparser_10.dll 导出表现场生成（无需 NVIDIA 账号下载 SDK）。
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-trt:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout self (patch files)
+        uses: actions/checkout@v4
+        with:
+          ref: gom2026-cuda-dump
+
+      - name: Checkout upstream Gom2026-cuda-optimized-v2
+        uses: actions/checkout@v4
+        with:
+          repository: hzyhhzy/KataGomo
+          ref: Gom2026-cuda-optimized-v2
+          path: src
+
+      - name: Apply kata-dump-subtree gtp patch
+        shell: pwsh
+        run: |
+          Copy-Item patches/gom2026-gtp-with-dump.cpp src/cpp/command/gtp.cpp -Force
+          $t = Get-Content src/cpp/command/gtp.cpp -Raw
+          Write-Host ("kata-dump-subtree: " + ([regex]::Matches($t, "kata-dump-subtree")).Count)
+          Write-Host ("dumpSubtreeRec: " + ([regex]::Matches($t, "dumpSubtreeRec")).Count)
+
+      - name: Fetch TensorRT 10.16 public headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse -b v10.16 https://github.com/NVIDIA/TensorRT trtsrc
+          Push-Location trtsrc
+          git sparse-checkout set include
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path trtroot/include | Out-Null
+          Copy-Item trtsrc/include/* trtroot/include -Recurse -Force
+          Get-ChildItem trtroot/include -Filter *.h | Select-Object Name,Length | Format-Table
+          Select-String -Path trtroot/include/NvInferVersion.h -Pattern 'NV_TENSORRT_(MAJOR|MINOR|PATCH)'
+
+      - name: Fetch TensorRT runtime DLLs (for import-lib generation)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trtdll | Out-Null
+          Invoke-WebRequest -Uri https://github.com/lanyu2998/KataGomo/releases/download/trt10-libs/nvinfer_10.dll -OutFile trtdll/nvinfer_10.dll -TimeoutSec 600
+          Invoke-WebRequest -Uri https://github.com/lanyu2998/KataGomo/releases/download/trt10-libs/nvonnxparser_10.dll -OutFile trtdll/nvonnxparser_10.dll -TimeoutSec 600
+          Get-ChildItem trtdll | Select-Object Name,Length | Format-Table
+
+      - name: Generate import libraries from DLL exports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trtroot/lib, trtroot/lib64 | Out-Null
+          function New-ImportLib([string]$dllPath, [string]$outLib) {
+            $txt = & dumpbin /nologo /exports $dllPath
+            $names = New-Object System.Collections.Generic.List[string]
+            foreach ($l in $txt) {
+              if ($l -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') {
+                $names.Add($Matches[1])
+              }
+            }
+            $names = $names | Select-Object -Unique
+            Write-Host "$([IO.Path]::GetFileName($dllPath)) exports: $($names.Count)"
+            $def = "LIBRARY $([IO.Path]::GetFileName($dllPath))`r`nEXPORTS`r`n" + (($names | ForEach-Object { "  $_" }) -join "`r`n")
+            Set-Content -Path "$outLib.def" -Value $def -Encoding ascii
+            & lib /nologo /def:"$outLib.def" /machine:x64 /out:$outLib
+            if (-not (Test-Path $outLib)) { throw "lib generation failed for $outLib" }
+            Write-Host "generated $outLib ($((Get-Item $outLib).Length) bytes)"
+          }
+          New-ImportLib "trtdll/nvinfer_10.dll"      "trtroot/lib/nvinfer.lib"
+          New-ImportLib "trtdll/nvonnxparser_10.dll" "trtroot/lib/nvonnxparser.lib"
+          Copy-Item trtroot/lib/*.lib trtroot/lib64 -Force
+          Get-ChildItem trtroot/lib | Select-Object Name,Length | Format-Table
+
+      - name: Install CUDA Toolkit 12.6 (public download)
+        uses: Jimver/cuda-toolkit@v0.2.20
+        with:
+          cuda: '12.6.3'
+          method: 'network'
+          sub-packages: '["nvcc","cudart","cublas","cufft"]'
+          use-github-cache: false
+
+      - name: Check CUDA
+        shell: pwsh
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          if (Test-Path "$env:CUDA_PATH\include\cuda_runtime_api.h") { Write-Host "cuda_runtime_api.h OK" }
+          Get-ChildItem "$env:CUDA_PATH\lib\x64" -Filter "cudart_static.lib" | Select-Object Name,Length
+
+      - name: Install zlib via vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg $env:GITHUB_WORKSPACE\vcpkg
+          & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
+          & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
+
+      - name: Setup MSVC env
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure (CMake Ninja + TensorRT backend)
+        shell: pwsh
+        run: |
+          $tc = "${env:GITHUB_WORKSPACE}\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          cmake -B src/build-trt -S src/cpp `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DUSE_BACKEND=TENSORRT `
+            -DUSE_TCMALLOC=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$tc" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DTENSORRT_ROOT_DIR="$env:GITHUB_WORKSPACE\trtroot" `
+            -DTENSORRT_INCLUDE_DIR="$env:GITHUB_WORKSPACE\trtroot\include" `
+            -DTENSORRT_LIBRARY="$env:GITHUB_WORKSPACE\trtroot\lib\nvinfer.lib" `
+            -DTENSORRT_ONNX_LIBRARY="$env:GITHUB_WORKSPACE\trtroot\lib\nvonnxparser.lib"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build src/build-trt --target katago
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item src/build-trt/katago.exe out/katago-trt-dump.exe -Force
+          if (Test-Path src/build-trt/zlib.dll) { Copy-Item src/build-trt/zlib.dll out/ -Force }
+          if (Test-Path src/build-trt/libz.dll) { Copy-Item src/build-trt/libz.dll out/ -Force }
+          $s = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("out/katago-trt-dump.exe"))
+          Write-Host ("dump command present: " + $s.Contains("kata-dump-subtree"))
+          Get-ChildItem out | Format-Table Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: katagomo-gom2026-trt-dump
+          path: out/*
+
