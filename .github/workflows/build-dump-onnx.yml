@@ -1,6 +1,9 @@
 name: Build KataGomo ONNX-capable (CUDA, kata-dump-subtree patch)
 
-# 鍩轰簬 Gom-onnx 鍒嗘敮缂栬瘧锛歄NNX 鍏堣В鏋愭垚 ModelDesc 鍐嶄氦缁?CUDA 鍚庣锛?# 鍗曚釜 exe 鍚屾椂鏀寔 .bin.gz锛坮enju_18b锛変笌 .onnx锛坹ijing锛夛紝鍧囧甫 dump 涓庡拰妫嬬巼鐩村嚭銆?on:
+# Gom-onnx branch: ONNX models are parsed into ModelDesc first, then run by the CUDA
+# backend. A single exe supports both .bin.gz (renju_18b) and .onnx (yijing), with
+# kata-dump-subtree and the drawrate output for draw-rate collection.
+on:
   workflow_dispatch:
 
 jobs:
