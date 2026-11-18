@@ -51,6 +51,9 @@ jobs:
           Invoke-WebRequest -Uri https://github.com/lanyu2998/KataGomo/releases/download/trt10-libs/nvonnxparser_10.dll -OutFile trtdll/nvonnxparser_10.dll -TimeoutSec 600
           Get-ChildItem trtdll | Select-Object Name,Length | Format-Table
 
+      - name: Setup MSVC env
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Generate import libraries from DLL exports
         shell: pwsh
         run: |
@@ -97,9 +100,6 @@ jobs:
           git clone --depth 1 https://github.com/microsoft/vcpkg $env:GITHUB_WORKSPACE\vcpkg
           & $env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat
           & $env:GITHUB_WORKSPACE\vcpkg\vcpkg install zlib:x64-windows-release
-
-      - name: Setup MSVC env
-        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure (CMake Ninja + TensorRT backend)
         shell: pwsh
